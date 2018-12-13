@@ -1,0 +1,42 @@
+#!/bin/bash
+
+[ -z "$1" ] && {
+    echo "Usage: zoneparse <switch fqdn> [username]"
+    exit
+}
+
+SWUSER="${1:-admin}"
+
+zparse() {
+    MATCH=$1
+    printf -v CMDSTR '%s %s' $2 '"%s","%s"\n'
+    shift 2
+    while [ $# -gt 0 ]; do
+        if [ $1 == "${MATCH}:" ] ;then
+            [ ! -z "$NAME" ] && {
+                printf "$CMDSTR" "$NAME" "${ENTRY}"
+            }
+            NAME="$2"
+            ENTRY="${3%;}"
+            shift 3
+            continue
+        else
+            ENTRY="${ENTRY}; ${1%;}"
+            shift
+        fi
+    done
+    [ ! -z "$NAME" ] && {
+        printf "$CMDSTR" "$NAME" "${ENTRY}"
+    }
+    unset NAME ENTRY
+}
+
+SWITCHFQDN="$1"
+SWITCH="${1%%.*}"
+
+zparse alias alicreate $(ssh -A -oHostKeyAlgorithms=+ssh-dss ${SWUSER}@${SWITCHFQDN} 'alishow "*",1')
+zparse zone zonecreate $(ssh -A -oHostKeyAlgorithms=+ssh-dss ${SWUSER}@${SWITCHFQDN} 'zoneshow "*",1')
+zparse cfg cfgcreate $(ssh -A -oHostKeyAlgorithms=+ssh-dss ${SWUSER}@${SWITCHFQDN} 'cfgshow "*",1')
+
+echo "cfgsave -f"
+echo "cfgshow"
