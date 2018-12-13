@@ -7,7 +7,7 @@ At my company, I have a lab environment with some really aging equipment.  Curre
 
 # Syntax
 
-brocadeparse <switch-FQDN> [username]
+brocadeparse \<switch-FQDN\> [username]
 * username defaults to "admin" if not specified
 
 # Usage Notes
