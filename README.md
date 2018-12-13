@@ -3,7 +3,7 @@ A simple tool to connect to a brocade FabricOS switch and parse its zoning confi
 
 ## Overview
 
-At my company, I have a lab environment with some really aging equipment.  Currently I have 4Gbit Brocade switches and I have some brand new 32Gbit switches.  Unfortunately they are too far apart to mesh, so the only way to transfer the zoning information is by hand.  So, I wrote this script instead.
+At my company, I have a lab environment with some really aging equipment.  Currently I have 4Gbit Brocade switches and I have some brand new 32Gbit switches.  Unfortunately the 4Gbit switches won't mesh with the 16Gbit switches, so the only way to transfer the zoning information is by hand.  So, I wrote this script instead.
 
 ## Syntax
 ```bash
