@@ -26,3 +26,10 @@ sg_formatter -l |grep HITACHI| sg_formatter -f -m
 ```
 
 lists all detected drives, search for ones with the vendor HITACHI and pushes the result back in to be formatted and monitored through completion.
+
+## cert-manager
+Working with certificates can be a pain.  If you set up your own CA as I do for my homelab, it's nice to be able to take a CSR from a device (say an ILO, or VMware) and create a properly formatted cert that includes additional options like the IP address and alternate DNS names.  This script helps manage these.
+
+### Usage
+Controlled by two env vars: CADir -> location of CA keys and the extra options file.  CAPrefix -> prefix of filenames.  In my case, mjbrowns, so my cert is mjbrowns-ca.crt, mjbrowns-ca.key, mjbrowns.ext
+Run the script for a menu to manage stuff.
