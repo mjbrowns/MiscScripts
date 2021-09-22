@@ -1,0 +1,289 @@
+#!/bin/bash
+
+die() {
+    SCRIPTNAME=$(basename $(readlink -f $0))
+    if [ -t 2 ] ; then
+        for LN in "$@"; do
+            printf "%s\n" "$LN" >&2
+        done
+    else
+        for LN in "$@"; do
+            printf "%-15s %-10s %s\n" "$(date +'%F %T')" "${FACILITY:-$SCRIPTNAME}" "$LN" >&2
+        done
+    fi
+    exit 1
+}
+
+check_root() {
+    if [ $(id -g) -eq 0 ]; then
+        are_root=true
+    else
+        are_root=false
+    fi
+    [ -z "$1" ] && {
+        $are_root
+        return
+    }
+    eval $1 && {
+        eval $are_root || die "Must be run as root"
+        return
+    }
+    eval $1 || {
+        eval $are_root && die "Must NOT be run as root"
+        return
+    }
+}
+
+check_commands() {
+    MSTS=true
+    for i in $@; do
+        type -p $i >/dev/null 2>&1 || {
+            MSTS=false
+            echo "$i missing"
+        }
+    done
+    $MSTS
+}
+
+gen_list() {
+    sg_map | sort -k 1.8n| while read DEV DEV_BLOCK; do
+        eval $(sg_inq -u $DEV |awk -v FS== '{print $1 "=\"" $2 "\""}')
+        [ "${SCSI_TYPE:-null}" == "disk" ] || continue
+        [ "${SCSI_MODEL:-null}" == "LOGICAL_VOLUME" ] && continue
+        [ "${SCSI_MODEL:-null}" == "Virtual_disk" ] && continue
+        eval $(sg_inq -u --page=0x80 $DEV |awk -v FS== '{print $1 "=\"" $2 "\""}')
+        read DEV_BLOCKS DEV_BSZ <<< $(sg_readcap -b $DEV 2>/dev/null) || continue
+        DEV_SIZE=$(echo $(($DEV_BLOCKS * $DEV_BSZ))|numfmt --to=iec-i --suffix=B)
+        DEV_STATE="$(sg_turs --progress $DEV)"
+        printf "%-6s %-6s %4d %7s %-10s %-20s %-22s %-8s %s\n" \
+            "${DEV##/dev/}" "${DEV_BLOCK##/dev/}" "$DEV_BSZ" "$DEV_SIZE" "$SCSI_VENDOR" \
+            "$SCSI_MODEL" "$SCSI_IDENT_SERIAL" "$SCSI_REVISION" "$DEV_STATE"
+    done
+}
+
+list_devices() {
+    printf "%-6s %-6s %4s %7s %-10s %-20s %-22s %-8s %s\n" \
+        "#Dev" "BDev" "Bsz" "Size" "Vendor" "Model" "Serial" "Rev" "State"
+    printf "%-6s %-6s %4s %7s %-10s %-20s %-22s %-8s %s\n" \
+        "#-----" "------" "---" "-------" "----------" "--------------------" \
+        "----------------------" "--------" "--------------------"
+    gen_list |awk 'BEGIN{c=0};{c++;print};END{print "# Total Devices: " c}'
+}
+
+parse_input() {
+    echo "Enter list of devices, one per line, e.g. sg1"
+    echo "blank lines are ignored, as are those that begin with #"
+    while read DEV JUNK;do
+        [ "${DEV:0:1}" = "#" ] && continue
+        [ -z "$DEV" ] && continue
+        DEV=$(basename $DEV) ## strip off leading path if needed
+        if [ ! -e "/dev/$DEV" ]; then
+            >&2 echo "Error: $DEV is not found"
+            continue
+        fi
+        if [ -b "/dev/$DEV" ] ; then ## convert to /block device format
+            DEV2=$(sg_map26 /dev/$DEV) || {
+                >&2 echo "Could not map $DEV to sg device"
+                continue
+            }
+            DEV="$(basename $DEV2)"
+        fi
+        eval $(sg_inq -u "/dev/$DEV" |awk -v FS== '{print $1 "=\"" $2 "\""}')
+        [ "${SCSI_TYPE:-null}" == "disk" ] || {
+            >&2 echo "Error: $DEV is not a disk"
+            continue
+        }
+        [ "${SCSI_MODEL:-null}" == "LOGICAL_VOLUME" ] && {
+            >&2 echo "Error: $DEV is a RAID logical volume"
+            continue
+        }
+        [ "${SCSI_MODEL:-null}" == "Virtual_disk" ] && {
+            >&2 echo "Error: $DEV is a VMware virtual disk"
+            continue
+        }
+        if [ -b /dev/$DEV -o -c /dev/$DEV ]; then
+            DRIVE_LIST+=($(basename $DEV))
+        else
+            >&2 echo "Error: $DEV is not a character or block special device"
+            continue
+        fi
+    done
+}
+
+wipe_drives() {
+    CMD="nwipe $WIPE_OPTS"
+    if [ -n "$WIPE_LOG" ] ; then
+        touch "$WIPE_LOG" || die "Error: could not write to wipe log: $WIPE_LOG"
+        CMD="$CMD --logfile=$WIPE_LOG"
+    fi
+    if [ "$CONFIRM_ACTION" != "true" ]; then
+        echo "Ready to wipe:"
+        echo "${DRIVE_LIST[@]}"
+        read -p "Are you sure you want to wipe (y/N): " ANS
+        typeset -l CHK=${ANS:0:1}
+        if [ "$CHK" != "y" ]; then
+            return
+        fi
+    fi
+    ${WIPE_GUI:-false} || CMD="${CMD} --nogui --nowait"
+    declare -a DRIVE_PATHS
+    for i in ${DRIVE_LIST[@]}; do
+        dpath=$(sg_map26 /dev/$i)
+        if [ -b $dpath ]; then
+            DRIVE_PATHS+=($dpath)
+        else
+            2>&1 echo "Warning: /dev/$i could not be mapped to a block device, skipping"
+        fi
+    done
+    CMD="$CMD ${DRIVE_PATHS[*]}"
+    printf "Wiping:\n"
+    printf "Drives:  \n%s\n" "${DRIVE_LIST[*]}"
+    printf "Command: \n%s\n" "$CMD"
+    if [ "${DRY_RUN:-true}" = "false" ]; then
+        $CMD
+    fi
+}
+
+format_drives() {
+    for dev in ${DRIVE_LIST[@]}; do
+        CMD="sg_format --format --six --early --quick --size=${FORMAT_BLOCK}"
+        if [ "$FORMAT_MODE" = "quick" ]; then
+            CMD="$CMD --ffmt=1"
+        fi
+        if [ "$CONFIRM_ACTION" != "true" ]; then
+            read -p "Are you sure you want to format $dev (y/N): " ANS
+            typeset -l CHK=${ANS:0:1}
+            if [ "$CHK" != "y" ]; then
+                continue
+            fi
+        fi
+        CMD="$CMD /dev/$dev"
+        echo "Formatting $dev: $CMD"
+        if [ "${DRY_RUN:-true}" = "false" ]; then
+            $CMD
+        fi
+    done
+}
+
+monitor_status() {
+    FORMAT_COLUMNS=1
+    FORMAT_WIDTH=$(tput cols)
+    (( ${FORMAT_WIDTH:-0} >= 80 )) && FORMAT_COLUMNS=2
+    (( ${FORMAT_WIDTH:-0} >= 120 )) && FORMAT_COLUMNS=3
+    while true; do
+        clear
+        echo "Press Ctrl-C to cancel monitoring..."
+        echo ""
+        echo "$(date)"
+        echo ""
+        for dev in ${DRIVE_LIST[@]}; do
+            dev_sts="$(sg_turs --progress /dev/$dev)"
+            printf "%-5s %s\n" "$dev" "${dev_sts:-Complete}"
+        done|pr -t --columns $FORMAT_COLUMNS -w ${COLUMNS:-80}
+        sleep ${MONITOR_TIMER:-10}
+    done
+}
+
+show_help() {
+    cat <<EOD
+Option:
+    -l                  List Disks (default)
+    -f                  Format disks
+    -w                  Wipe disks using nwipe - can not be used with Format or Monitor
+    -m                  Monitor
+
+    Format options:
+
+    -d                  Dry Run: does not do the format, displays commands
+    -y                  Do not confirm after parsing the disk list.
+    -b <size>           Blocksize to format, default is 512
+    -q                  Option to Format using the quick SCSI format mode (-ffmt=1)
+                        Not supported on all drives
+
+    Wipe options:
+    -d                  Dry Run: does not do the format, displays commands
+    -y                  Do not confirm after parsing the disk list.
+    -g                  Use GUI mode.
+    -L file             Log file name
+    -o <string>         options for nwipe.  Defaults are
+                            --autonuke --verify=off --sync -m prng -p mersenne -r 1 --noblank
+
+    Monitor options:
+    -m                  With format, monitor status after starting
+    -t                  With monitor, sets the sleep interval between refreshes
+
+    Reads list of disks from stdin, one per line.  Lines beginning with # are ignored.
+    The first word on the line is expected to be a disk name (e.g. sg1).
+    Anything after the disk name is ignored, so -l can be piped back into sg_formatter
+    Note: if you pipe a list of devices into sg_formatter, you must use -f
+EOD
+}
+
+check_root true
+check_commands sg_readcap sg_inq sg_format nwipe || die "Install missing commands (usually nwipe and sg3-utils) and retry"
+
+CONFIRM_ACTION="false"
+DRY_RUN="false"
+MONITOR_TIMER=10
+WIPE_REQUESTED="false"
+WIPE_GUI="false"
+WIPE_LOG=""
+WIPE_OPTS="--autonuke --verify=off --sync -m prng -p mersenne -r 1 --noblank"
+
+FORMAT_MODE="normal"
+FORMAT_BLOCK=512
+FORMAT_MONITOR="false"
+FORMAT_REQUESTED="false"
+declare -a DRIVE_LIST
+
+if [ -z "$1" ]; then
+    list_devices
+    exit 0
+fi
+
+while [ -n "$1" ]; do
+    case "$1" in
+        -l) list_devices
+            exit 0
+            ;;
+        -w) WIPE_REQUESTED="true"
+            ${FORMAT_REQUESTED:-false} && die "Format and wipe can not be used in the same pass"
+            ${MONITOR_REQUESTED:-false} && die "Monitor and wipe can not be used in the same pass"
+            ;;
+        -f) FORMAT_REQUESTED="true"
+            ${WIPE_REQUESTED:-false} && die "Format and wipe can not be used in the same pass"
+            ;;
+        -m) FORMAT_MONITOR="true"
+            ${WIPE_REQUESTED:-false} && die "Monitor and wipe can not be used in the same pass"
+            ;;
+        -o) WIPE_OPTS="$2"
+            shift
+            ;;
+        -L) WIPE_LOG="$2"
+            shift
+            ;;
+        -b) FORMAT_BLOCK="$2"
+            shift
+            ;;
+        -g) WIPE_GUI="true"
+            ;;
+        -d) DRY_RUN="true"
+            ;;
+        -y) CONFIRM_ACTION="true"
+            ;;
+        -q) FORMAT_MODE="quick"
+            ;;
+        -t) MONITOR_TIMER="$2"
+            shift
+            ;;
+        *)  show_help
+            exit 0
+            ;;
+    esac
+    shift
+done
+
+parse_input
+${FORMAT_REQUESTED:-false} && format_drives
+${WIPE_REQUESTED:-false} && wipe_drives
+${FORMAT_MONITOR:-false} && monitor_status
