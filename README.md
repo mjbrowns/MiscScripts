@@ -32,4 +32,5 @@ Working with certificates can be a pain.  If you set up your own CA as I do for 
 
 ### Usage
 Controlled by two env vars: CADir -> location of CA keys and the extra options file.  CAPrefix -> prefix of filenames.  In my case, mjbrowns, so my cert is mjbrowns-ca.crt, mjbrowns-ca.key, mjbrowns.ext
-Run the script for a menu to manage stuff.
+
+Run the script for a menu to manage stuff.  see the man page for x509v3_config for details on setting up the ca extensions file.
