@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+ScriptPath="$(readlink -f $0)"
+ScriptDir="${ScriptPath%/*}"
+CAPrefix="${CAName:-mjbrowns}"
+CADir="${CADir:-${PWD}/CA}"
+CACRT="${CADir}/${CAPrefix}-ca.crt"
+CAKEY="${CADir}/${CAPrefix}-ca.key"
+CAEXT="${CADir}/${CAPrefix}.ext"
+
+function die {
+    >&2 echo "$@"
+    exit 1
+}
+
+[ -d "$CADir" ] || die "Error: CA Directory Not found!"
+[ -f "$CACRT" ] || die "Error: CA Certificate Not Found!"
+[ -f "$CAKEY" ] || die "Error: CA Private Key Not Found!"
+
+function signCSRext {
+    echo "Enter CSR file name:"
+    read -ep "$PWD/" FN
+    if [ ! -r "$FN" ] ;then
+        >&2 echo "Error: CSR file not found or not readable"
+        return
+    fi
+    FNO="${FN%.*}.crt"
+    FNE="${FN%.*}"
+    FNE="${FNE##*/}"
+
+    echo "Processing CSR $FN, output is $FNO"
+    openssl x509 -req -in "$FN" -CA "$CACRT" -CAkey "$CAKEY" -CAcreateserial -extfile "$CAEXT" -extensions "$FNE" -out "$FNO" -days 3650
+}
+function signCSR {
+    echo "Enter CSR filename: "
+    read -ep "$PWD/" FN
+    if [ ! -r "$FN" ] ;then
+        >&2 echo "Error: CSR file not found or not readable"
+        return
+    fi
+    FNO="${FN%.*}.crt"
+
+    echo "Processing CSR $FN, output is $FNO"
+    openssl x509 -req -in "$FN" -CA "$CACRT" -CAkey "$CAKEY" -CAcreateserial -out "$FNO" -days 3650
+}
+
+showCert() {
+    echo "Enter Cert Filename:"
+    read -ep "$PWD/" FN
+    if [ ! -r "$FN" ]; then
+        >&2 echo "Error: file not found or not readable"
+        return
+    fi
+    case ${FN##*.} in
+        csr)
+            openssl req -in "$FN" -text -noout -reqopt no_pubkey,no_sigdump
+            ;;
+        crt)
+            openssl x509 -in "$FN" -text -noout -certopt no_pubkey,no_sigdump
+            ;;
+    esac
+}
+
+function showHelp {
+    echo "Functions"
+    echo ""
+    echo "s - sign a certificate request"
+    echo "e - sign a certificate request with extensions"
+    echo "v - view a certificate or request"
+    echo "d - edit the extensions database"
+    echo ""
+    echo "q - quit"
+    echo ""
+}
+
+function menu {
+    showHelp
+    typeset -l mchoice=""
+    read -p "Choice? " mchoice
+    case "$mchoice" in
+        s)  signCSR ;;
+        e)  signCSRext ;;
+        v)  showCert ;;
+        d)  vi "$CAEXT" ;;
+        q)  mexit="y" ;;
+    esac
+}
+
+typeset -l mexit="n"
+while [ "$mexit" != "y" ]; do
+    menu
+done
