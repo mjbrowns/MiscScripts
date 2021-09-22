@@ -1,7 +1,7 @@
-#Miscellaneous Scripts
+# Miscellaneous Scripts
 A variety of scripts I've written over the years that various people have suggested might be useful to others.
 
-##brocadeparse
+## brocadeparse
 A simple tool to connect to a brocade FabricOS switch and parse its zoning configuration (aliases, zones, configurations) so they can be re-created easily on a new set of switches.  It is highly recommended to get ssh keys loaded on all the switches so you don't get prompted for the passwords a bunch of times
 
 ### Syntax
