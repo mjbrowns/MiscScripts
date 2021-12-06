@@ -2,7 +2,7 @@
 
 die() {
     SCRIPTNAME=$(basename $(readlink -f $0))
-    if [ -t 2 ] ; then
+    if [ -t 2 ] ; then 
         for LN in "$@"; do
             printf "%s\n" "$LN" >&2
         done
@@ -19,7 +19,7 @@ check_root() {
         are_root=true
     else
         are_root=false
-    fi
+    fi 
     [ -z "$1" ] && {
         $are_root
         return
@@ -52,13 +52,13 @@ gen_list() {
         [ "${SCSI_MODEL:-null}" == "LOGICAL_VOLUME" ] && continue
         [ "${SCSI_MODEL:-null}" == "Virtual_disk" ] && continue
         eval $(sg_inq -u --page=0x80 $DEV |awk -v FS== '{print $1 "=\"" $2 "\""}')
-        read DEV_BLOCKS DEV_BSZ <<< $(sg_readcap -b $DEV 2>/dev/null) || continue
+        read DEV_BLOCKS DEV_BSZ <<< $(sg_readcap -l -b $DEV 2>/dev/null) || continue
         DEV_SIZE=$(echo $(($DEV_BLOCKS * $DEV_BSZ))|numfmt --to=iec-i --suffix=B)
         DEV_STATE="$(sg_turs --progress $DEV)"
         printf "%-6s %-6s %4d %7s %-10s %-20s %-22s %-8s %s\n" \
             "${DEV##/dev/}" "${DEV_BLOCK##/dev/}" "$DEV_BSZ" "$DEV_SIZE" "$SCSI_VENDOR" \
             "$SCSI_MODEL" "$SCSI_IDENT_SERIAL" "$SCSI_REVISION" "$DEV_STATE"
-    done
+    done    
 }
 
 list_devices() {
@@ -73,7 +73,7 @@ list_devices() {
 parse_input() {
     echo "Enter list of devices, one per line, e.g. sg1"
     echo "blank lines are ignored, as are those that begin with #"
-    while read DEV JUNK;do
+    while read DEV JUNK;do 
         [ "${DEV:0:1}" = "#" ] && continue
         [ -z "$DEV" ] && continue
         DEV=$(basename $DEV) ## strip off leading path if needed
@@ -137,11 +137,46 @@ wipe_drives() {
     done
     CMD="$CMD ${DRIVE_PATHS[*]}"
     printf "Wiping:\n"
-    printf "Drives:  \n%s\n" "${DRIVE_LIST[*]}"
+    printf "Drives:  \n%s\n" "${DRIVE_LIST[*]}" 
     printf "Command: \n%s\n" "$CMD"
     if [ "${DRY_RUN:-true}" = "false" ]; then
-        $CMD
+        $CMD 
     fi
+    exit 0
+}
+
+remove_drives() {
+    for dev in ${DRIVE_LIST[@]}; do
+        devpath="/sys/class/scsi_generic/${dev}/device/delete"
+        if [ "$CONFIRM_ACTION" != "true" ]; then
+            read -p "Are you sure you want to format $dev (y/N): " ANS
+            typeset -l CHK=${ANS:0:1}
+            if [ "$CHK" != "y" ]; then
+                continue
+            fi
+        fi
+        echo "Removing $dev using $devpath"
+        if [ "${DRY_RUN:-true}" = "false" ]; then
+            echo "1" > $devpath
+        fi
+    done
+    exit 0
+}
+
+scan_drives() {
+    for bus in $(find /sys/class/scsi_host -type l -name 'host*' -printf '%f '); do
+        driver=$(</sys/class/scsi_host/${bus}/proc_name)
+        [ -f /sys/class/scsi_host/${bus}/firmware_revision ] && fwver=$(</sys/class/scsi_host/${bus}/firmware_revision)
+        [ -f /sys/class/scsi_host/${bus}/version_fw ] && fwver=$(</sys/class/scsi_host/${bus}/version_fw)
+        printf "Rescanning %-10s %-15s %-15s" $bus $driver "$fwver"
+        if [ "${DRY_RUN:-true}" = "false" ]; then
+            echo "- - -" > /sys/class/scsi_host/${bus}/scan
+            echo "(done)"
+        else
+            echo "(skipped, dry-run)"
+        fi
+    done
+    exit 0
 }
 
 format_drives() {
@@ -191,6 +226,8 @@ Option:
     -f                  Format disks
     -w                  Wipe disks using nwipe - can not be used with Format or Monitor
     -m                  Monitor
+    -R                  Remove disks from kernel
+    -S                  Rescan all buses for devices (reverses effects of -R)
 
     Format options:
 
@@ -199,21 +236,28 @@ Option:
     -b <size>           Blocksize to format, default is 512
     -q                  Option to Format using the quick SCSI format mode (-ffmt=1)
                         Not supported on all drives
-
+    
     Wipe options:
     -d                  Dry Run: does not do the format, displays commands
     -y                  Do not confirm after parsing the disk list.
     -g                  Use GUI mode.
     -L file             Log file name
-    -o <string>         options for nwipe.  Defaults are
+    -o <string>         options for nwipe.  Defaults are    
                             --autonuke --verify=off --sync -m prng -p mersenne -r 1 --noblank
+
+    Remove options:
+    -d                  Dry Run: does not do the format, displays commands
+    -y                  Do not confirm after parsing disk list
+
+    Scan options:
+    -d                  Dry Run: does not do the format, displays commands
 
     Monitor options:
     -m                  With format, monitor status after starting
     -t                  With monitor, sets the sleep interval between refreshes
 
-    Reads list of disks from stdin, one per line.  Lines beginning with # are ignored.
-    The first word on the line is expected to be a disk name (e.g. sg1).
+    Reads list of disks from stdin, one per line.  Lines beginning with # are ignored. 
+    The first word on the line is expected to be a disk name (e.g. sg1).  
     Anything after the disk name is ignored, so -l can be piped back into sg_formatter
     Note: if you pipe a list of devices into sg_formatter, you must use -f
 EOD
@@ -243,18 +287,40 @@ fi
 
 while [ -n "$1" ]; do
     case "$1" in
-        -l) list_devices
+        -d) DRY_RUN="true"
+            ;;
+        -y) CONFIRM_ACTION="true"
+            ;;
+        -l) list_devices 
             exit 0
             ;;
         -w) WIPE_REQUESTED="true"
-            ${FORMAT_REQUESTED:-false} && die "Format and wipe can not be used in the same pass"
-            ${MONITOR_REQUESTED:-false} && die "Monitor and wipe can not be used in the same pass"
+            ${FORMAT_REQUESTED:-false} && die "Format and wipe are incompatible"
+            ${MONITOR_REQUESTED:-false} && die "Monitor and wipe are incompatible"
+            ${SCAN_REQUESTED:-false} && die "Wipe and scan are incompatible"
+            ${REMOVE_REQUESTED:-false} && die "Wipe and remove are incompatible"
             ;;
         -f) FORMAT_REQUESTED="true"
-            ${WIPE_REQUESTED:-false} && die "Format and wipe can not be used in the same pass"
+            ${WIPE_REQUESTED:-false} && die "Format and wipe are incompatible"
+            ${SCAN_REQUESTED:-false} && die "Format and scan are incompatible"
+            ${REMOVE_REQUESTED:-false} && die "Format and remove are incompatible"
             ;;
         -m) FORMAT_MONITOR="true"
-            ${WIPE_REQUESTED:-false} && die "Monitor and wipe can not be used in the same pass"
+            ${WIPE_REQUESTED:-false} && die "Monitor and wipe are incompatible"
+            ${SCAN_REQUESTED:-false} && die "Monitor and scan are incompatible"
+            ${REMOVE_REQUESTED:-false} && die "Monitor and remove are incompatible"
+            ;;
+        -S) SCAN_REQUESTED="true"
+            ${REMOVE_REQUESTED:-false} && die "Scan and remove are incompatible"
+            ${WIPE_REQUESTED:-false} && die "Scan and wipe are incompatible"
+            ${FORMAT_REQUESTED:-false} && die "Scan and format are incompatible"
+            ${MONITOR_REQUESTED:-false} && die "Scan and monitor are incompatible"
+            ;;
+        -R) REMOVE_REQUESTED="true"
+            ${SCAN_REQUESTED:-false} && die "Scan and remove are incompatible"
+            ${WIPE_REQUESTED:-false} && die "Remove and wipe are incompatible"
+            ${FORMAT_REQUESTED:-false} && die "Remove and format are incompatible"
+            ${MONITOR_REQUESTED:-false} && die "Remove and monitor are incompatible"
             ;;
         -o) WIPE_OPTS="$2"
             shift
@@ -266,10 +332,6 @@ while [ -n "$1" ]; do
             shift
             ;;
         -g) WIPE_GUI="true"
-            ;;
-        -d) DRY_RUN="true"
-            ;;
-        -y) CONFIRM_ACTION="true"
             ;;
         -q) FORMAT_MODE="quick"
             ;;
@@ -283,7 +345,9 @@ while [ -n "$1" ]; do
     shift
 done
 
+${SCAN_REQUESTED:-false} && scan_drives
 parse_input
-${FORMAT_REQUESTED:-false} && format_drives
+${REMOVE_REQUESTED:-false} && remove_drives
 ${WIPE_REQUESTED:-false} && wipe_drives
+${FORMAT_REQUESTED:-false} && format_drives
 ${FORMAT_MONITOR:-false} && monitor_status
