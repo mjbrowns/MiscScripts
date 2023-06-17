@@ -6,6 +6,7 @@ CADir="${CADir:-${PWD}/CA}"
 CACRT="${CADir}/${CAPrefix}-ca.crt"
 CAKEY="${CADir}/${CAPrefix}-ca.key"
 CAEXT="${CADir}/${CAPrefix}.ext"
+CSRCONF="${CADir}/${CAPrefix}-csr.conf"
 
 function die {
     >&2 echo "$@"
@@ -31,7 +32,7 @@ function signCSRext {
     openssl x509 -req -in "$FN" -CA "$CACRT" -CAkey "$CAKEY" -CAcreateserial -extfile "$CAEXT" -extensions "$FNE" -out "$FNO" -days 3650
 }
 function signCSR {
-    echo "Enter CSR filename: "
+    echo "Enter CSR filename: " 
     read -ep "$PWD/" FN
     if [ ! -r "$FN" ] ;then
         >&2 echo "Error: CSR file not found or not readable"
@@ -60,12 +61,45 @@ showCert() {
     esac
 }
 
+genCSR() {
+    echo "Enter CSR Filename:"
+    read -ep "$PWD/" FN
+    FCSR="${FN%.*}.csr"
+    FKEY="${FN%.*}.key"
+    echo "Using $FCSR and $FKEY"
+    touch "$FCSR" || {
+        >&2 echo "Error: file could not be opened for writing"
+        return
+    }
+    openssl req -newkey rsa:2048 -keyout "$FKEY" -out "$FCSR" -nodes -config "$CSRCONF"
+}
+
+makeBundle() {
+    echo "Enter Private Key Filename:"
+    read -ep "$PWD/" FKEY 
+    [ -r "$FKEY" ] || {
+        >&2 echo "Error: file not found or not readable"
+        return
+    }
+    echo "Enter Certificate Filename:"
+    read -ep "$PWD/" FCRT
+    [ -r "$FKEY" ] || {
+        >&2 echo "Error: file not found or not readable"
+        return
+    }
+    FN="${FCRT%.*}-bundle.pem"
+    echo "Writing $FN"
+    cat "$FKEY" "$FCRT" "$CACRT" > "$FN"
+}
+
 function showHelp {
     echo "Functions"
     echo ""
+    echo "c - generate a certificate request (CSR)"
     echo "s - sign a certificate request"
     echo "e - sign a certificate request with extensions"
     echo "v - view a certificate or request"
+    echo "b - create a PEM bundle (key, crt, CA)"
     echo "d - edit the extensions database"
     echo ""
     echo "q - quit"
@@ -76,10 +110,12 @@ function menu {
     showHelp
     typeset -l mchoice=""
     read -p "Choice? " mchoice
-    case "$mchoice" in
+    case "$mchoice" in 
+        c)  genCSR ;;
         s)  signCSR ;;
         e)  signCSRext ;;
         v)  showCert ;;
+        b)  makeBundle ;;
         d)  vi "$CAEXT" ;;
         q)  mexit="y" ;;
     esac
@@ -88,4 +124,4 @@ function menu {
 typeset -l mexit="n"
 while [ "$mexit" != "y" ]; do
     menu
-done
+done 

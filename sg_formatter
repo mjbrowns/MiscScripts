@@ -47,6 +47,7 @@ check_commands() {
 
 gen_list() {
     sg_map | sort -k 1.8n| while read DEV DEV_BLOCK; do
+        sg_turs $DEV > /dev/null 2>&1 || continue
         eval $(sg_inq -u $DEV |awk -v FS== '{print $1 "=\"" $2 "\""}')
         [ "${SCSI_TYPE:-null}" == "disk" ] || continue
         [ "${SCSI_MODEL:-null}" == "LOGICAL_VOLUME" ] && continue
@@ -149,7 +150,7 @@ remove_drives() {
     for dev in ${DRIVE_LIST[@]}; do
         devpath="/sys/class/scsi_generic/${dev}/device/delete"
         if [ "$CONFIRM_ACTION" != "true" ]; then
-            read -p "Are you sure you want to format $dev (y/N): " ANS
+            read -p "Are you sure you want to remove $dev (y/N): " ANS
             typeset -l CHK=${ANS:0:1}
             if [ "$CHK" != "y" ]; then
                 continue
@@ -164,11 +165,24 @@ remove_drives() {
 }
 
 scan_drives() {
-    for bus in $(find /sys/class/scsi_host -type l -name 'host*' -printf '%f '); do
+    if [ -n "${SCAN_LIST}" ]; then
+        printf "%-10s %-15s %-15s\n" "Bus" "Driver" "Firmware"
+        printf "%-10s %-15s %-15s\n" "----------" "---------------" "---------------"
+    fi
+    for bus in $(find /sys/class/scsi_host -type l -name 'host*' -printf '%f\n'|sort); do
+        if [ -n "$SCAN_BUS" ]; then
+            echo "$SCAN_BUS" | grep -q "$bus" || continue
+        fi
         driver=$(</sys/class/scsi_host/${bus}/proc_name)
+        [ "$driver" = "usb-storage" ] && continue
         [ -f /sys/class/scsi_host/${bus}/firmware_revision ] && fwver=$(</sys/class/scsi_host/${bus}/firmware_revision)
         [ -f /sys/class/scsi_host/${bus}/version_fw ] && fwver=$(</sys/class/scsi_host/${bus}/version_fw)
-        printf "Rescanning %-10s %-15s %-15s" $bus $driver "$fwver"
+        if [ -n "${SCAN_LIST}" ]; then
+            printf "%-10s %-15s %-15s\n" $bus $driver "$fwver"
+            continue
+        else
+            printf "Rescanning %-10s %-15s %-15s" $bus $driver "$fwver"
+        fi
         if [ "${DRY_RUN:-true}" = "false" ]; then
             echo "- - -" > /sys/class/scsi_host/${bus}/scan
             echo "(done)"
@@ -243,13 +257,15 @@ Option:
     -g                  Use GUI mode.
     -L file             Log file name
     -o <string>         options for nwipe.  Defaults are    
-                            --autonuke --verify=off --sync -m prng -p mersenne -r 1 --noblank
+                            --autonuke --verify=off --sync -m prng -p isaac -r 1 --noblank
 
     Remove options:
     -d                  Dry Run: does not do the format, displays commands
     -y                  Do not confirm after parsing disk list
 
     Scan options:
+    -b                  Specifies the bus to rescan.  
+    -a                  Just lists available device hosts to scan
     -d                  Dry Run: does not do the format, displays commands
 
     Monitor options:
@@ -272,7 +288,9 @@ MONITOR_TIMER=10
 WIPE_REQUESTED="false"
 WIPE_GUI="false"
 WIPE_LOG=""
-WIPE_OPTS="--autonuke --verify=off --sync -m prng -p mersenne -r 1 --noblank"
+WIPE_OPTS="--autonuke --verify=off --sync -m prng -p isaac -r 1 --noblank"
+SCAN_BUS=""
+SCAN_LIST=""
 
 FORMAT_MODE="normal"
 FORMAT_BLOCK=512
@@ -322,6 +340,8 @@ while [ -n "$1" ]; do
             ${FORMAT_REQUESTED:-false} && die "Remove and format are incompatible"
             ${MONITOR_REQUESTED:-false} && die "Remove and monitor are incompatible"
             ;;
+        -a) SCAN_LIST="true"
+            ;;
         -o) WIPE_OPTS="$2"
             shift
             ;;
@@ -329,6 +349,7 @@ while [ -n "$1" ]; do
             shift
             ;;
         -b) FORMAT_BLOCK="$2"
+            SCAN_BUS="$2"
             shift
             ;;
         -g) WIPE_GUI="true"
