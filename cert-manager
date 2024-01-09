@@ -1,125 +1,409 @@
 #!/usr/bin/env bash
-ScriptPath="$(readlink -f $0)"
-ScriptDir="${ScriptPath%/*}"
-CAPrefix="${CAName:-mjbrowns}"
-CADir="${CADir:-${PWD}/CA}"
-CACRT="${CADir}/${CAPrefix}-ca.crt"
-CAKEY="${CADir}/${CAPrefix}-ca.key"
-CAEXT="${CADir}/${CAPrefix}.ext"
-CSRCONF="${CADir}/${CAPrefix}-csr.conf"
+typeset -i DAYS=398
+typeset -i NDAYS=0
+
+printf -v hr '%.s─' {1..60}
+
+bo=$(tput bold)
+rs=$(tput sgr0)
+h6=$(tput setaf 6)
+hr="$h6$hr$rs"
+
+bold() {
+    echo -n $bo
+    echo "$@"
+    echo -n $rs
+}
+
+highlight() {
+    tput setaf $1
+    shift
+    echo "$@"
+    echo -n $rs
+}
+
+function savefile() {
+    [ -f "$1" ] && {
+        cp "$1" "${1}.$(date +%Y%m%d.%H%M)"
+    }
+}
 
 function die {
-    >&2 echo "$@"
+    >&2 highlight 1 "$@"
     exit 1
 }
 
-[ -d "$CADir" ] || die "Error: CA Directory Not found!"
-[ -f "$CACRT" ] || die "Error: CA Certificate Not Found!"
-[ -f "$CAKEY" ] || die "Error: CA Private Key Not Found!"
 
-function signCSRext {
-    echo "Enter CSR file name:"
+makeconf() {
+    [ -f "$CSRCONF" ] && return
+    cat > "$CSRCONF" << EOD    
+[ req ]
+default_bits = 4096
+default_keyfile = privkey.pem
+distinguished_name = req_distinguished_name
+prompt = yes
+
+[ req_distinguished_name ]
+countryName                 = Country Name
+countryName_default         = US
+countryName_min             = 2
+countryName_max             = 2
+
+stateOrProvinceName         = State or Province
+stateOrProvinceName_default = FL
+stateOrProvinceName_min     = 2
+stateOrProvinceName_max     = 12
+
+
+localityName                = Locality Name
+localityName_default        = Locality
+localityName_max            = 32
+
+organizationalUnitName          = Organizational Unit Name
+organizationalUnitName_default  = Org Name
+organizationalUnitName_max      = 32
+
+commonName                      = Common Name (server, Your name)
+commonName_max                  = 64
+
+emailAddress                    = Email Address
+emailAddress_default            = you@example.com
+emailAddress_max                = 32
+EOD
+}
+
+makeext() {
+    cat > "$CAEXT" << EOD
+#[certificate-name]  <- this identifies the name of the crt you are creating
+#the remaining lines are valid ssl cert extensions.  Most common:
+#subjectAltName=IP:192.168.1.1,DNS:hostname.example.com,DNS:hostname
+EOD
+    highlight 3 "Created sample extensions database $CAEXT."
+}
+
+create_ca() {
+    typeset -l ans
+    highlight 3 "If you encrypt your CA Key you must provide a password and that password"
+    highlight 3 "will be required for every use of the CA for signing requests"
+    echo ""
+    read -p "${bo}Encrypt CA Key?${rs} " ans
+    if [ "${ans[0]}" = "y" ]; then
+        openssl genrsa -aes256 -out "$CAKEY" 4096
+    else
+        openssl genrsa -out "$CAKEY" 4096
+    fi
+    makeconf 
+    openssl req -x509 -new -nodes -key "$CAKEY" -sha256 -days 1826 -config "$CSRCONF" -out "$CACRT"
+    makeext
+    settings=$(openssl x509 -in "$CACRT" -text -noout -certopt no_pubkey,no_sigdump|grep "Issuer:")
+    settings=${settings#*Issuer: }
+    set -- $(echo $settings|tr -d ',')
+    while [ -n "$1" ]; do
+        case "$1" in
+            C)  sed -ie "s/countryName_default.*/countryName_default = $3/" "$CSRCONF" 
+                shift 2
+                ;;
+            L)  sed -ie "s/localityName_default.*/localityName_default = $3/" "$CSRCONF" 
+                shift 2
+                ;;
+            ST) sed -ie "s/stateOrProvinceName_default.*/stateOrProvinceName_default = $3/" "$CSRCONF" 
+                shift 2
+                ;;
+            CN) sed -ie "s/commonName_default.*/commonName_default = $3/" "$CSRCONF" 
+                shift 2
+                ;;
+            OU) sed -ie "s/organizationalUnitName_default.*/organizationalUnitName_default = $3/" "$CSRCONF" 
+                shift 2
+                ;;
+            emailAddress) 
+                sed -ie "s/emailAddress_default.*/emailAddress_default = $3/" "$CSRCONF" 
+                shift 2
+                ;;
+        esac
+        shift
+    done
+}
+
+set_ca() {
+    echo "$hr"
+    highlight 3 "Existing prefixes:"
+    find ${CADIR} -name '*.ext' -printf '%f\n' | sed -e 's/\.ext//'
+    echo "$hr"
+    typeset -l cap="$1" 
+    if [ -z "$cap" ]; then
+        def_pre=${CAPREFIX:-$(whoami)}
+        read -p "${bo}What CA name do you want to use? ($def_pre)${rs} " cap
+        cap="${cap:-$def_pre}"
+    fi
+    CACRT="${CADIR}/${cap}-ca.crt"
+    CAKEY="${CADIR}/${cap}-ca.key"
+    CAEXT="${CADIR}/${cap}.ext"
+    CERTS="${TOPDIR}/certs-${cap}"
+    CSRCONF="${CADIR}/${cap}-csr.conf"
+    CAPREFIX="$cap"
+    [ ! -f "$CAKEY" ] && create_ca
+    [ ! -f "$CACRT" ] && create_ca
+    [ ! -f "$CAEXT" ] && create_ca
+    [ ! -f "$CSRCONF" ] && create_ca
+    [ ! -d "$CERTS" ] && mkdir -p "$CERTS"
+    cd "$CERTS"
+    echo "$CAPREFIX" > ${TOPDIR}/.certmgr
+}
+
+load_config() {
+    SAVES="${TOPDIR}/backup"
+    CADIR="${TOPDIR}/ca"
+    if [ -r "${TOPDIR}/.certmgr" ]; then
+        CAPREFIX="$(<${TOPDIR}/.certmgr)"
+        set_ca "$CAPREFIX"
+    else
+        printf "Certificate Directory (%s) not initialized\n" "$TOPDIR"
+        typeset -l ans
+        read -p "${bo}Initialize?${rs} " ans
+        [ "${ans[0]}" != "y" ] && {
+            echo -e "\n\n$(bold Options:)\n"
+            echo "  Specify -d option to point to existing Certificate Directory"
+            echo "  Change directory to the directory you want to initialize"
+            echo "Then rerun this tool"
+            echo ""
+            die "Directory not initialized"
+        }
+        mkdir -p ${SAVES}
+        mkdir -p ${CADIR}
+        set_ca 
+    fi
+    [ -d "$CADIR" ] || die "Error: CA Directory Not found!"
+    [ -f "$CACRT" ] || die "Error: CA Certificate Not Found!"
+    [ -f "$CAKEY" ] || die "Error: CA Private Key Not Found!"
+}
+
+function signCSR {
+    printf '\n%s\n' $hr
+    bold "Enter CSR file name:"
     read -ep "$PWD/" FN
+    FN=${FN%.}
+    FN="${FN%.csr}.csr"
     if [ ! -r "$FN" ] ;then
-        >&2 echo "Error: CSR file not found or not readable"
+        >&2 highlight 1 "Error: CSR file not found or not readable"
         return
     fi
-    FNO="${FN%.*}.crt"
-    FNE="${FN%.*}"
+    FNO="${FN%.csr}.crt"
+    FNE="${FN%.csr}"
     FNE="${FNE##*/}"
 
-    echo "Processing CSR $FN, output is $FNO"
-    openssl x509 -req -in "$FN" -CA "$CACRT" -CAkey "$CAKEY" -CAcreateserial -extfile "$CAEXT" -extensions "$FNE" -out "$FNO" -days 3650
-}
-function signCSR {
-    echo "Enter CSR filename: " 
-    read -ep "$PWD/" FN
-    if [ ! -r "$FN" ] ;then
-        >&2 echo "Error: CSR file not found or not readable"
-        return
+    echo "$hr"
+    highlight 3 "Processing CSR $FN, output is $FNO"
+    echo "$hr"
+    savefile "$FNO"
+    BN=${FN%.*}
+    if grep -q "^\[$BN\]" $CAEXT; then
+        openssl x509 -req -in "$FN" -CA "$CACRT" -CAkey "$CAKEY" \
+            -CAcreateserial -extfile "$CAEXT" -extensions "$FNE" -out "$FNO" -days $DAYS || \
+            die "Error signing certificate"
+    else
+        highlight 3 "Warning: entry for $BN not found in extensions database!"
+        openssl x509 -req -in "$FN" -CA "$CACRT" -CAkey "$CAKEY" \
+            -CAcreateserial -extfile "$CAEXT" -out "$FNO" -days $DAYS || \
+            die "Error signing certificate"
     fi
-    FNO="${FN%.*}.crt"
-
-    echo "Processing CSR $FN, output is $FNO"
-    openssl x509 -req -in "$FN" -CA "$CACRT" -CAkey "$CAKEY" -CAcreateserial -out "$FNO" -days 3650
 }
-
 showCert() {
-    echo "Enter Cert Filename:"
+    printf '\n%s\n' $hr
+    highlight 3 "Enter Cert/Csr Filename:"
     read -ep "$PWD/" FN
+    [ "$FN" == "ca" ] && FN="$CACRT"
+    FN=${FN%.}
+    [ ! -r "$FN" ] && FN="${FN}.crt"
+    [ ! -r "$FN" ] && FN="${FN#.crt}.csr"
+    [ ! -r "$FN" ] && FN="${FN#.crt}.pem"
     if [ ! -r "$FN" ]; then
-        >&2 echo "Error: file not found or not readable"
+        >&2 highlight 1 "Error: could not find matching cert/csr"
         return
     fi
+    echo "$hr"
     case ${FN##*.} in
         csr)
             openssl req -in "$FN" -text -noout -reqopt no_pubkey,no_sigdump
             ;;
-        crt)
+        crt|pem)
             openssl x509 -in "$FN" -text -noout -certopt no_pubkey,no_sigdump
             ;;
     esac
 }
 
 genCSR() {
-    echo "Enter CSR Filename:"
+    printf '\n%s\n' $hr
+    highlight 3 "Enter CSR Filename:"
     read -ep "$PWD/" FN
-    FCSR="${FN%.*}.csr"
-    FKEY="${FN%.*}.key"
+    FN=${FN%.}
+    FN="${FN%.csr}.csr"
+    FCSR="${FN%.csr}.csr"
+    FKEY="${FN%.csr}.key"
+    echo "$hr"
     echo "Using $FCSR and $FKEY"
+    echo "$hr"
     touch "$FCSR" || {
-        >&2 echo "Error: file could not be opened for writing"
+        >&2 highglight 1 "Error: file could not be opened for writing"
         return
     }
-    openssl req -newkey rsa:2048 -keyout "$FKEY" -out "$FCSR" -nodes -config "$CSRCONF"
+    openssl req -newkey rsa -keyout "$FKEY" -out "$FCSR" -nodes -config "$CSRCONF" 
 }
 
 makeBundle() {
-    echo "Enter Private Key Filename:"
-    read -ep "$PWD/" FKEY 
-    [ -r "$FKEY" ] || {
-        >&2 echo "Error: file not found or not readable"
+    printf '\n%s\n' $hr
+    highlight 3 "Enter Certificate Filename:"
+    read -ep "$PWD/" FN 
+    FN=${FN%.}
+    FCRT="${FN%.crt}.crt"
+    FKEY="${FN%.crt}.key"
+    [ -r "$FCRT" ] || {
+        >&2 highlight 1 "Error: cert not found or not readable: $FCRT"
         return
     }
-    echo "Enter Certificate Filename:"
-    read -ep "$PWD/" FCRT
     [ -r "$FKEY" ] || {
-        >&2 echo "Error: file not found or not readable"
+        >&2 highlight 1 "Error: private key not found or not readable: $FKEY"
         return
     }
-    FN="${FCRT%.*}-bundle.pem"
-    echo "Writing $FN"
-    cat "$FKEY" "$FCRT" "$CACRT" > "$FN"
+    FB="${FN%.*}.pem"
+    typeset -l ans
+    highlight 3 "Including the key can be unwise, especially if the key has not encrypted!"
+    read -p "${bo}Do you want to include the key?${rs} "
+    echo $hr
+    highlight 3 "Writing $FB"
+    if [ "${ans[0]}" = "y" ]; then
+        cat "$FCRT" "$CACRT" > "$FB"
+    else
+        cat "$FKEY" "$FCRT" "$CACRT" > "$FB"
+    fi
 }
 
-function showHelp {
-    echo "Functions"
+makeBackup() {
+    OF="${SAVES}/${CAPREFIX}-$(date +%Y%m%d-%H%M%S).tgz"
+    ( cd $TOPDIR
+        if tar czf "$OF" ca/${CAPREFIX}* certs-${CAPREFIX}; then
+            echo $hr
+            highlight 3 "Successful backup of $CAPREFIX made to $OF"
+        else
+            echo $hr
+            highlight 1 "Backup of $CAPREFIX failed!"
+        fi
+    )
+}
+
+setDays() {
+    highlight 3 "Max days for most browsers now is 398 (just over 1Y)"
+    highlight 3 "Certificate tools allow up to 3650 (10 years)"
     echo ""
+    read -p "${bo}Enter Number of Days:${rs} " NDAYS
+    [ $NDAYS -gt 3650 ] && NDAYS=3650
+    [ $NDAYS -gt 0 ] && {
+        DAYS=$NDAYS
+        return
+    }
+    highlight 1 "invalid number of days $NDAYS, using $DAYS"
+}
+
+regenCerts() {
+    printf '\n%s\n' $hr
+    read -p "${bo}Enter filter prefix or <enter> for all:${rs} " PF
+    if [ -r "$PF" ] ; then 
+        FLIST=("$PF")
+    else
+        FLIST=$(find . -name "$PF*.csr" -printf '%f ' )
+    fi
+    echo $hr
+    highlight 3 "List of certs to regenerate:"
+    for FN in $FLIST;do
+        printf "...%s\n" "$FN"
+    done
+    typeset -l ANS
+    echo $hr
+    read -n1 -p "Is this correct (y/N)? " ANS
+    [ "$ANS" != "y" ] && return
+    for FN in $FLIST;do
+        highlight 4 $FN
+        FN="${FN%.csr}.csr"
+        if [ ! -r "$FN" ] ;then
+            >&2 highlight 1 "Error: CSR file not found or not readable: $FN"
+            continue
+        fi
+        FNO="${FN%.csr}.crt"
+        FNE="${FN%.csr}"
+        FNE="${FNE##*/}"
+
+        echo $hr
+        highlight 3 "Processing CSR $FN, output is $FNO"
+        savefile "$FNO"
+        openssl x509 -req -in "$FN" -CA "$CACRT" -CAkey "$CAKEY" -CAcreateserial -extfile "$CAEXT" -extensions "$FNE" -out "$FNO" -days $DAYS
+    done
+}
+
+function showMenu {
+    echo "$hr"
+    highlight 4 "Root Dir: $TOPDIR"
+    highlight 4 "Prefix:   $CAPREFIX"
+    echo "$hr"
+    highlight 3 "Functions"
+    echo "$hr"
+    echo "b - make a backup of this cert tree"
     echo "c - generate a certificate request (CSR)"
+    echo "e - edit the extensions database"
+    echo "m - make a PEM bundle (?key, crt, CA)"
+    echo "p - change CA prefix"
+    echo "r - regenerate certificates"
     echo "s - sign a certificate request"
-    echo "e - sign a certificate request with extensions"
+    echo "t - change certificate expiration time ($DAYS days)"
     echo "v - view a certificate or request"
-    echo "b - create a PEM bundle (key, crt, CA)"
-    echo "d - edit the extensions database"
-    echo ""
+    echo "$hr"
     echo "q - quit"
-    echo ""
+    echo "$hr"
 }
 
 function menu {
-    showHelp
+    showMenu
     typeset -l mchoice=""
-    read -p "Choice? " mchoice
+    read -p "${bo}Choice?${rs} " mchoice
     case "$mchoice" in 
+        b)  makeBackup ;;
+        m)  makeBundle ;;
         c)  genCSR ;;
+        e)  vi "$CAEXT" ;;
+        p)  set_ca ;;
+        r)  regenCerts ;;
         s)  signCSR ;;
-        e)  signCSRext ;;
         v)  showCert ;;
-        b)  makeBundle ;;
-        d)  vi "$CAEXT" ;;
         q)  mexit="y" ;;
+        t)  setDays ;;
+        *)  showMenu ;;
     esac
 }
+
+while [ -n "$1" ]; do
+    case "$1" in
+        -h) echo "Options:"
+            echo "  -m <days> max cert days, default is 398"
+            echo "  -d <dir>  top level directory to store certs"
+            exit
+            ;;
+        -m) NDAYS=$2
+            [ $NDAYS -gt 0 ] && DAYS=$NDAYS
+            [ $NDAYS -gt 3650 ] && DAYS=3650
+            shift
+            ;;
+        -d) TOPDIR="$(readlink -f $2)"
+            shift
+            ;;
+        *)
+            highlight 1 "Unknown argument $1"
+            exit
+            ;;
+    esac
+    shift
+done
+
+TOPDIR=${TOPDIR:-$PWD}
+load_config
+
 
 typeset -l mexit="n"
 while [ "$mexit" != "y" ]; do
